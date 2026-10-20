@@ -269,7 +269,7 @@ def recompute_w_u_fwd_gdn2(
     u = torch.empty_like(v)
     qg = torch.empty_like(q) if q is not None else None
     kg = torch.empty_like(k) if gk is not None else None
-    parallel = IS_NVIDIA and g_raw is not None and gk is not None
+    parallel = IS_NVIDIA and g_raw is not None and gk is not None and cu_seqlens is None
     kernel = recompute_w_u_fwd_gdn2_parallel_kernel if parallel else recompute_w_u_fwd_gdn2_kernel
     tasks = triton.cdiv(V, BV) + triton.cdiv(K, BK) + triton.cdiv(K, 32) if parallel else 1
     kernel[(NT * tasks, B * H)](
