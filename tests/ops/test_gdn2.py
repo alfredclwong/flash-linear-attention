@@ -15,6 +15,7 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.gdn2 import chunk_gdn2, fused_recurrent_gdn2, naive_recurrent_gdn2
+from fla.ops.gdn2.gate import gdn2_chunk_gate
 from fla.ops.kda.gate import naive_kda_gate, naive_kda_lowerbound_gate
 from fla.utils import IS_AMD, IS_NPU, IS_NVIDIA, assert_close, device, device_platform
 
@@ -56,6 +57,33 @@ def _rand_inputs(B, T, H, HV, K, V, dtype, *, gate_in_kernel=False):
     else:
         g = torch.empty(B, T, HV, K, device=device, dtype=torch.float32).uniform_(-5.0, -0.1).to(dtype)
     return q, k, v, g, b, w, A_log, dt_bias
+
+
+@pytest.mark.skipif(not IS_NVIDIA, reason="Separate WY tail scan is selected on NVIDIA")
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize('varlen', [False, True], ids=['dense', 'varlen'])
+def test_chunk_tail_decayed_keys(dtype, varlen):
+    """Tail decay excludes each write's gate and stops at packed chunk boundaries."""
+    torch.manual_seed(42)
+    B, T, H, K = (1, 161, 2, 60) if varlen else (2, 130, 2, 60)
+    k = torch.randn(B, T, H, K, device=device, dtype=dtype)
+    g = -torch.rand(B, T, H, K, device=device, dtype=torch.float32)
+    g[:, [5, 15, 31, 63, 64, 127], :, ::3] = -1e8
+    offsets = [0, 17, 82, T] if varlen else [0, T]
+    cu = torch.tensor(offsets, device=device, dtype=torch.int64) if varlen else None
+    expected = torch.empty_like(k)
+    for start, end in zip(offsets, offsets[1:]):
+        for chunk in range(start, end, 64):
+            stop = min(chunk + 64, end)
+            for token in range(chunk, stop):
+                decay = g[:, token + 1:stop].double().sum(dim=1).exp()
+                expected[:, token] = (k[:, token].double() * decay).to(dtype)
+    actual = gdn2_chunk_gate(g=g, cu_seqlens=cu, k=k)
+    assert actual.dtype == k.dtype
+    assert torch.isfinite(actual).all()
+    assert_close('tail-decayed keys', expected, actual, 0.005)
+    with pytest.raises(ValueError, match='separate calls'):
+        gdn2_chunk_gate(g=g, dg=g, k=k)
 
 
 @pytest.mark.skipif(not (IS_NVIDIA or IS_AMD or IS_NPU), reason="CUDA/ROCm or Ascend NPU required")

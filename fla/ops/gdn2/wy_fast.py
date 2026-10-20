@@ -27,11 +27,11 @@ import torch
 import triton
 import triton.language as tl
 
-from fla.ops.gdn2.gate import gdn2_local_log_cumsum
+from fla.ops.gdn2.gate import gdn2_chunk_gate, gdn2_local_log_cumsum
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.cache import fla_cache_autotune
 from fla.ops.utils.op import exp2
-from fla.utils import autotune_cache_kwargs
+from fla.utils import IS_NVIDIA, autotune_cache_kwargs
 
 
 @triton.heuristics({
@@ -176,12 +176,16 @@ def recompute_w_u_fwd_gdn2(
     w = torch.empty_like(k)
     u = torch.empty_like(v)
     qg = torch.empty_like(q) if q is not None else None
-    kg = torch.empty_like(k) if gk is not None else None
+    separate_tail = IS_NVIDIA and g_raw is not None and gk is not None
+    if separate_tail:
+        kg = gdn2_chunk_gate(g=g_raw, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices, chunk_size=BT, k=k)
+    else:
+        kg = torch.empty_like(k) if gk is not None else None
     recompute_w_u_fwd_gdn2_kernel[(NT, B * H)](
         q=q,
         k=k,
         qg=qg,
-        kg=kg,
+        kg=None if separate_tail else kg,
         v=v,
         b=b,
         w_gate=w_gate,

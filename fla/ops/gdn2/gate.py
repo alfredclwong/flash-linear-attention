@@ -106,6 +106,7 @@ def gdn2_chunk_gate_kernel(
     BK: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     dg=None,
+    k=None,
 ):
     i_tk = tl.program_id(0).to(tl.int64)
     i_t, i_k = i_tk // tl.cdiv(K, BK), i_tk % tl.cdiv(K, BK)
@@ -130,6 +131,9 @@ def gdn2_chunk_gate_kernel(
         value = tl.cumsum(b_dg, axis=0, reverse=True)
         # an underflowed decay has zero derivative, even when prefix-gradient cancellation leaves roundoff
         value = tl.where(exp2(b_g * 1.4426950408889634) == 0, 0., value)
+    if k is not None:
+        b_k = tl.load(k + offsets, mask, other=0)
+        value = b_k * tl.where(mask, exp2(value), 0)
     tl.store(out + offsets, value, mask)
 
 
@@ -139,14 +143,17 @@ def gdn2_chunk_gate(
     chunk_indices: torch.Tensor | None = None,
     chunk_size: int = 64,
     dg: torch.Tensor | None = None,
+    k: torch.Tensor | None = None,
 ):
-    """Compute log suffixes or reduce prefix gradients to token-gate gradients."""
+    """Compute log suffixes, tail-decayed keys, or token-gate gradients."""
+    if dg is not None and k is not None:
+        raise ValueError("Tail-decayed keys and gate gradients require separate calls")
     B, T, H, K = g.shape
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     NT = triton.cdiv(T, chunk_size) if chunk_indices is None else len(chunk_indices)
     BK = min(32, triton.next_power_of_2(K))
-    out = torch.empty_like(g, dtype=torch.float32)
+    out = torch.empty_like(k) if k is not None else torch.empty_like(g, dtype=torch.float32)
     gdn2_chunk_gate_kernel[(NT * triton.cdiv(K, BK), B * H)](
         g=g,
         out=out,
@@ -159,5 +166,6 @@ def gdn2_chunk_gate(
         BK=BK,
         IS_VARLEN=cu_seqlens is not None,
         dg=dg,
+        k=k,
     )
     return out
