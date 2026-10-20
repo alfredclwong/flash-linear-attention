@@ -231,12 +231,12 @@ def recompute_w_u_fwd_gdn2_parallel_kernel(
                 tl.store(qg + offsets, (b_q * exp2(b_g)).to(qg.dtype.element_ty), mask=mask)
     else:
         o_s = (i_c - NV - NK) * BS + tl.arange(0, BS)
-        offsets = ((bos + o_t[:, None]) * H + i_h) * K + o_s[None, :]
-        mask = m_t[:, None] & (o_s[None, :] < K)
-        b_ks = tl.load(k + offsets, mask=mask, other=0)
+        offsets_s = ((bos + o_t[:, None]) * H + i_h) * K + o_s[None, :]
+        mask_s = m_t[:, None] & (o_s[None, :] < K)
+        b_ks = tl.load(k + offsets_s, mask=mask_s, other=0)
         b_gs = gdn2_local_log_cumsum(g_raw + (bos * H + i_h) * K, i_t * BT, min(i_t * BT + BT, T), o_s, H, K, BT, True)
         b_kg = b_ks * tl.where(m_t[:, None], exp2(b_gs), 0)
-        tl.store(kg + offsets, b_kg.to(kg.dtype.element_ty), mask=mask)
+        tl.store(kg + offsets_s, b_kg.to(kg.dtype.element_ty), mask=mask_s)
 
 
 def recompute_w_u_fwd_gdn2(
